@@ -1,15 +1,20 @@
 #include <JeeLib.h>
 #include <util/parity.h>
+#include <avr/sleep.h>
 #include "Arduino.h"
 
 #define DEBUG
 
 const long InternalReferenceVoltage = 1074L;  // Change this to the reading from your internal voltage reference
 
-#define LED_PIN     9   // activity LED
-#define BUTTON_PIN  8
+const int LED_PIN = 9;
+const int BUTTON_INTERRUPT = 1;
+const int BUTTON_PIN = BUTTON_INTERRUPT + 2;
 
-unsigned char payload[] = "DB    ";
+unsigned char payload[] = "DB     ";
+//                           ^^------- recipient, always spaces for broadcast
+//                             ^------ 1 = doorbell is ringing
+//                              ^^---- battery voltage, unsigned 16-bit int
 
 void startADC() {
     ADMUX = (0<<REFS1) | (0<<REFS0) | (0<<ADLAR) | (1<<MUX3) | (1<<MUX2) | (1<<MUX1) | (0<<MUX0);
@@ -26,66 +31,107 @@ int endADC() {
     return (((InternalReferenceVoltage * 1023L) / ADC) + 5L) / 10L;
 }
 
+void sendPacket() {
+    digitalWrite(LED_PIN, 1);
+
+#ifdef DEBUG
+    Serial.println("start adc");
+#endif
+    startADC();
+    endADC();
+    startADC();
+
+#ifdef DEBUG
+    Serial.println("wake rf12");
+#endif
+	rf12_sleep(-1);
+
+#ifdef DEBUG
+    Serial.println("end adc");
+#endif
+    int value = endADC();
+    payload[4] = 1;
+    *((int*)(payload + 5)) = value;
+
+#ifdef DEBUG
+    Serial.print("send start, voltage: ");
+    Serial.println(value);
+#endif
+    while (!rf12_canSend()) {
+    	rf12_recvDone();
+    }
+    rf12_sendStart(0, payload, sizeof payload);
+    rf12_sendWait(0);
+
+#ifdef DEBUG
+    Serial.println("sent");
+#endif
+    digitalWrite(LED_PIN, 0);
+}
+
 void setup () {
 #ifdef DEBUG
     Serial.begin(57600);
-    Serial.print("init adc");
-#endif
-    startADC();
-#ifdef DEBUG
-    Serial.print("init rf12\n");
-#endif
-    rf12_initialize(2, RF12_868MHZ, 5);
-    int value = endADC();
-#ifdef DEBUG
-    Serial.print("send start\n");
+    Serial.println("doorbell");
 #endif
     pinMode(LED_PIN, OUTPUT);
     pinMode(BUTTON_PIN, INPUT);
-    digitalWrite(BUTTON_PIN, 0); // disable pull-up, since we have external pull down
-    digitalWrite(LED_PIN, 1);
-    *((int*)(payload + 4)) = value;
-    //for (byte i = 0; i < 5; i++) {
-#ifdef DEBUG
-    //    Serial.print(i);
-#endif
-        rf12_sendStart(0, payload, sizeof payload);
-#ifdef DEBUG
-    Serial.print("waiting\n");
-#endif
-        while (!rf12_canSend()) {
-        	rf12_recvDone();
-        }
-   // }
-#ifdef DEBUG
-    Serial.print("wait\n");
-#endif
-    digitalWrite(LED_PIN, 0);
-#ifdef DEBUG
-    Serial.print("sleep\n");
-#endif
+    digitalWrite(BUTTON_PIN, 0); // disable pull-up, since we have external pull up
+
+    rf12_initialize(2, RF12_868MHZ, 5);
 }
 
+void buttonPressed() {
+}
+
+bool receivedAck() {
+#ifdef DEBUG
+	Serial.print("RF12: ");
+	for (byte i = 0; i < rf12_len; ++i) {
+		Serial.print(rf12_data[i]);
+		Serial.print(" ");
+	}
+	Serial.println();
+#endif
+	return (rf12_len >= 5 && rf12_data[2] == 'D' && rf12_data[3] == 'B' && rf12_data[4] == 2);
+}
+
+MilliTimer retryTimer;
+
 void loop() {
-	Sleepy::loseSomeTime(10);
-	//while (!digitalRead(BUTTON_PIN)) ;
-    digitalWrite(LED_PIN, 1);
-    //startADC();
-    //int value = endADC();
-    //*((int*)(payload + 4)) = value;
-    //for (byte i = 0; i < 5; i++) {
 #ifdef DEBUG
-    //    Serial.print(i);
+    Serial.println("sleep");
+    Serial.flush();
 #endif
-        rf12_sendStart(0, payload, sizeof payload);
+    rf12_sleep(0);
+	set_sleep_mode(SLEEP_MODE_PWR_DOWN);
+	sleep_enable();
+	attachInterrupt(1, buttonPressed, FALLING);
+	sleep_mode();  //sleep now
+	//--------------- ZZZZZZ sleeping here
+	sleep_disable(); //fully awake now
+	detachInterrupt(1);
 #ifdef DEBUG
-    //Serial.print("waiting\n");
+    Serial.println("wakeup");
 #endif
-        while (!rf12_canSend()) {
-        	rf12_recvDone();
-        }
-    //}
-    digitalWrite(LED_PIN, 0);
+	sendPacket();
+
+	bool ack = false;
+	int retries = 10;
+	const int RETRY_INTERVAL = 300;
+	retryTimer.set(RETRY_INTERVAL);
+	while (!ack && retries > 0) {
+		if (rf12_recvDone() && rf12_crc == 0 && receivedAck()) {
+			ack = true;
+		}
+		if (retryTimer.poll()) {
+			sendPacket();
+			retries--;
+			retryTimer.set(RETRY_INTERVAL);
+		}
+	}
+
+	delay(500);
 }
 
 
