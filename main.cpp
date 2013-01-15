@@ -2,21 +2,40 @@
 #include <util/parity.h>
 #include <avr/sleep.h>
 #include "Arduino.h"
+#include <OneWire.h>
+#include <DallasTemperature.h>
 
-#define DEBUG
+//#define DEBUG
+
+ISR(WDT_vect) { Sleepy::watchdogEvent(); }
 
 const long InternalReferenceVoltage = 1074L;  // Change this to the reading from your internal voltage reference
 
 const int LED_PIN = 9;
 const int BUTTON_INTERRUPT = 1;
-const int BUTTON_PIN = BUTTON_INTERRUPT + 2;
+const int BUTTON_PIN = 3;
+const int TEMP_PIN = 8;
+const int TEMP_INTERVAL = 60000;
 
-unsigned char payload[] = "DB     ";
-//                           ^^------- recipient, always spaces for broadcast
-//                             ^------ 1 = doorbell is ringing
-//                              ^^---- battery voltage, unsigned 16-bit int
+volatile bool buttonPressed = false;
+
+unsigned char ringPayload[] = "DB   ";
+//                               ^^------- recipient, always spaces for broadcast
+//                                 ^------ 1 = doorbell is ringing
+
+unsigned char tempPayload[] = "DB       ";
+//                               ^^------- recipient, always spaces for broadcast
+//                                 ^------ 3 = temperature measurement
+//                                  ^^---- temperature, signed 16-bit int
+//                                    ^^-- battery, centivolts
+
+OneWire oneWire(TEMP_PIN);
+DallasTemperature sensors(&oneWire);
+DeviceAddress tempAddress;
 
 void startADC() {
+	// REFS1 REFS0          --> 0 0 AREF, Internal Vref turned off
+	// MUX3 MUX2 MUX1 MUX0  --> 1110 1.1V (VBG)
     ADMUX = (0<<REFS1) | (0<<REFS0) | (0<<ADLAR) | (1<<MUX3) | (1<<MUX2) | (1<<MUX1) | (0<<MUX0);
 
     // Start a conversion
@@ -31,8 +50,30 @@ int endADC() {
     return (((InternalReferenceVoltage * 1023L) / ADC) + 5L) / 10L;
 }
 
-void sendPacket() {
+void sendRingPacket() {
     digitalWrite(LED_PIN, 1);
+
+#ifdef DEBUG
+    Serial.println("wake rf12");
+#endif
+	rf12_sleep(RF12_WAKEUP);
+
+    while (!rf12_canSend()) {
+    	rf12_recvDone();
+    }
+    rf12_sendStart(0, ringPayload, sizeof ringPayload);
+    rf12_sendWait(0);
+
+#ifdef DEBUG
+    Serial.println("sent");
+#endif
+    digitalWrite(LED_PIN, 0);
+}
+
+void sendTempPacket() {
+#ifdef DEBUG
+    digitalWrite(LED_PIN, 1);
+#endif
 
 #ifdef DEBUG
     Serial.println("start adc");
@@ -42,31 +83,56 @@ void sendPacket() {
     startADC();
 
 #ifdef DEBUG
+    Serial.println("get temp");
+    Serial.flush();
+#endif
+    sensors.requestTemperatures();
+    Sleepy::loseSomeTime(1000);
+
+#ifdef DEBUG
     Serial.println("wake rf12");
 #endif
-	rf12_sleep(-1);
+	rf12_sleep(RF12_WAKEUP);
 
 #ifdef DEBUG
     Serial.println("end adc");
 #endif
-    int value = endADC();
-    payload[4] = 1;
-    *((int*)(payload + 5)) = value;
+    int voltage = endADC();
+    *((int*)(tempPayload + 7)) = voltage;
+
+    float tempC = sensors.getTempC(tempAddress);
+    int temp = (int) (tempC * 100);
+    *((int*)(tempPayload + 5)) = temp;
 
 #ifdef DEBUG
-    Serial.print("send start, voltage: ");
-    Serial.println(value);
+    Serial.print("send start, voltage and temp: ");
+    Serial.println(voltage);
+    Serial.println(temp);
 #endif
     while (!rf12_canSend()) {
     	rf12_recvDone();
     }
-    rf12_sendStart(0, payload, sizeof payload);
+    rf12_sendStart(0, tempPayload, sizeof tempPayload);
     rf12_sendWait(0);
 
 #ifdef DEBUG
     Serial.println("sent");
-#endif
     digitalWrite(LED_PIN, 0);
+#endif
+}
+
+void printAddress(DeviceAddress deviceAddress)
+{
+  for (uint8_t i = 0; i < 8; i++)
+  {
+    // zero pad the address if necessary
+    if (deviceAddress[i] < 16) Serial.print("0");
+    Serial.print(deviceAddress[i], HEX);
+  }
+}
+
+void onButtonPressed() {
+	buttonPressed = true;
 }
 
 void setup () {
@@ -78,10 +144,29 @@ void setup () {
     pinMode(BUTTON_PIN, INPUT);
     digitalWrite(BUTTON_PIN, 0); // disable pull-up, since we have external pull up
 
-    rf12_initialize(2, RF12_868MHZ, 5);
-}
+    ringPayload[4] = 1;
+    tempPayload[4] = 3;
 
-void buttonPressed() {
+    rf12_initialize(2, RF12_868MHZ, 5);
+
+    sensors.begin();
+    Serial.print("Found ");
+    Serial.print(sensors.getDeviceCount());
+    Serial.println(" temp sensor.");
+
+    Serial.print("Parasite power is: ");
+    if (sensors.isParasitePowerMode()) Serial.println("ON"); else Serial.println("OFF");
+
+    if (!sensors.getAddress(tempAddress, 0)) Serial.println("Unable to find temp sensor");
+
+    Serial.print("Device 0 Address: ");
+    printAddress(tempAddress);
+    Serial.println();
+
+    sensors.setResolution(tempAddress, 12);
+    sensors.setWaitForConversion(false);
+
+	attachInterrupt(1, onButtonPressed, FALLING);
 }
 
 bool receivedAck() {
@@ -97,24 +182,8 @@ bool receivedAck() {
 }
 
 MilliTimer retryTimer;
-
-void loop() {
-#ifdef DEBUG
-    Serial.println("sleep");
-    Serial.flush();
-#endif
-    rf12_sleep(0);
-	set_sleep_mode(SLEEP_MODE_PWR_DOWN);
-	sleep_enable();
-	attachInterrupt(1, buttonPressed, FALLING);
-	sleep_mode();  //sleep now
-	//--------------- ZZZZZZ sleeping here
-	sleep_disable(); //fully awake now
-	detachInterrupt(1);
-#ifdef DEBUG
-    Serial.println("wakeup");
-#endif
-	sendPacket();
+void handleDoorbell() {
+	sendRingPacket();
 
 	bool ack = false;
 	int retries = 10;
@@ -125,7 +194,7 @@ void loop() {
 			ack = true;
 		}
 		if (retryTimer.poll()) {
-			sendPacket();
+			sendRingPacket();
 			retries--;
 			retryTimer.set(RETRY_INTERVAL);
 		}
@@ -134,35 +203,32 @@ void loop() {
 	delay(500);
 }
 
+void loop() {
+	sendTempPacket();
+	rf12_sleep(RF12_SLEEP);
+	ADCSRA &= ~(1<<ADEN);
+#ifdef DEBUG
+    Serial.println("sleep");
+    Serial.flush();
+#endif
+    Sleepy::loseSomeTime(TEMP_INTERVAL);
+#ifdef DEBUG
+    Serial.println("wakeup");
+#endif
+    ADCSRA |=  (1<<ADEN);
+    if (buttonPressed) {
+    	buttonPressed = false;
+    	handleDoorbell();
+    }
+}
 
 /*
-void setup( void )
-{
-  Serial.begin( 57600 );
-  Serial.println( "\r\n\r\n" );
-
-  // REFS1 REFS0          --> 0 0 AREF, Internal Vref turned off
-  // MUX3 MUX2 MUX1 MUX0  --> 1110 1.1V (VBG)
-  ADMUX = (0<<REFS1) | (0<<REFS0) | (0<<ADLAR) | (1<<MUX3) | (1<<MUX2) | (1<<MUX1) | (0<<MUX0);
-}
-
-void loop( void )
-{
-  int value;
-
-  // Start a conversion
-  ADCSRA |= _BV( ADSC );
-
-  // Wait for it to complete
-  while( ( (ADCSRA & (1<<ADSC)) != 0 ) );
-
-  // Scale the value
-  value = (((InternalReferenceVoltage * 1023L) / ADC) + 5L) / 10L;
-
-  Serial.println( value );
-  delay( 1000 );
-}
-*/
+3. Connect a 0.1 uF capacitor from AREF to ground
+4. Connect power to the board
+5. Upload the following Sketch...
+6. Wait for a few readings to be displayed in Serial Monitor
+7. Measure and record the voltage across the AREF capacitor.  In my case the voltage is 1.083.
+ */
 
 /*
 void setup( void )
