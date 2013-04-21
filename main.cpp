@@ -205,6 +205,8 @@ void handleDoorbell() {
 
 void loop() {
 	sendTempPacket();
+
+	buttonPressed = false;
 	rf12_sleep(RF12_SLEEP);
 	ADCSRA &= ~(1<<ADEN);
 #ifdef DEBUG
@@ -217,7 +219,6 @@ void loop() {
 #endif
     ADCSRA |=  (1<<ADEN);
     if (buttonPressed) {
-    	buttonPressed = false;
     	handleDoorbell();
     }
 }
