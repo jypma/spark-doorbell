@@ -11,23 +11,13 @@ ISR(WDT_vect) { Sleepy::watchdogEvent(); }
 
 const long InternalReferenceVoltage = 1074L;  // Change this to the reading from your internal voltage reference
 
-const int LED_PIN = 9;
+#include "home.h"
+
 const int BUTTON_INTERRUPT = 1;
 const int BUTTON_PIN = 3;
-const int TEMP_PIN = 8;
 const int TEMP_INTERVAL = 60000;
 
 volatile bool buttonPressed = false;
-
-unsigned char ringPayload[] = "DB   ";
-//                               ^^------- recipient, always spaces for broadcast
-//                                 ^------ 1 = doorbell is ringing
-
-unsigned char tempPayload[] = "DB       ";
-//                               ^^------- recipient, always spaces for broadcast
-//                                 ^------ 3 = temperature measurement
-//                                  ^^---- temperature, signed 16-bit int
-//                                    ^^-- battery, centivolts
 
 OneWire oneWire(TEMP_PIN);
 DallasTemperature sensors(&oneWire);
