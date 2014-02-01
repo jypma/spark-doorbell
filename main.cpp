@@ -9,8 +9,6 @@
 
 ISR(WDT_vect) { Sleepy::watchdogEvent(); }
 
-const long InternalReferenceVoltage = 1074L;  // Change this to the reading from your internal voltage reference
-
 #include "home.h"
 
 const int BUTTON_INTERRUPT = 1;
@@ -23,21 +21,28 @@ OneWire oneWire(TEMP_PIN);
 DallasTemperature sensors(&oneWire);
 DeviceAddress tempAddress;
 
-void startADC() {
-	// REFS1 REFS0          --> 0 0 AREF, Internal Vref turned off
-	// MUX3 MUX2 MUX1 MUX0  --> 1110 1.1V (VBG)
-    ADMUX = (0<<REFS1) | (0<<REFS0) | (0<<ADLAR) | (1<<MUX3) | (1<<MUX2) | (1<<MUX1) | (0<<MUX0);
-
-    // Start a conversion
-    ADCSRA |= _BV( ADSC );
-}
-
-int endADC() {
-    // Wait for it to complete
-    while( ( (ADCSRA & (1<<ADSC)) != 0 ) );
-
-    // Scale the value
-    return (((InternalReferenceVoltage * 1023L) / ADC) + 5L) / 10L;
+unsigned int getSupplyVoltage() {
+    unsigned int halfVoltage = analogRead(VCC_PIN);
+#ifdef DEBUG
+    Serial.print("VCC:");
+    Serial.println(halfVoltage);
+#endif
+    halfVoltage = analogRead(VCC_PIN);
+#ifdef DEBUG
+    Serial.print("VCC:");
+    Serial.println(halfVoltage);
+#endif
+    halfVoltage = analogRead(VCC_PIN);
+#ifdef DEBUG
+    Serial.print("VCC:");
+    Serial.println(halfVoltage);
+#endif
+    if (halfVoltage > VCC_MAX) halfVoltage = VCC_MAX;
+    if (halfVoltage < VCC_MIN) halfVoltage = VCC_MIN;
+    unsigned int percentage = (halfVoltage - VCC_MIN) * 100 / (VCC_MAX - VCC_MIN);
+#ifdef DEBUG
+#endif
+    return percentage;
 }
 
 void sendRingPacket() {
@@ -66,13 +71,6 @@ void sendTempPacket() {
 #endif
 
 #ifdef DEBUG
-    Serial.println("start adc");
-#endif
-    startADC();
-    endADC();
-    startADC();
-
-#ifdef DEBUG
     Serial.println("get temp");
     Serial.flush();
 #endif
@@ -87,8 +85,8 @@ void sendTempPacket() {
 #ifdef DEBUG
     Serial.println("end adc");
 #endif
-    int voltage = endADC();
-    *((int*)(tempPayload + 7)) = voltage;
+    unsigned int voltage = getSupplyVoltage();
+    *((unsigned int*)(tempPayload + 7)) = voltage;
 
     float tempC = sensors.getTempC(tempAddress);
     int temp = (int) (tempC * 100);
@@ -135,7 +133,7 @@ void setup () {
     digitalWrite(BUTTON_PIN, 0); // disable pull-up, since we have external pull up
 
     ringPayload[4] = 1;
-    tempPayload[4] = 3;
+    tempPayload[4] = 4;
 
     rf12_initialize(2, RF12_868MHZ, 5);
 
